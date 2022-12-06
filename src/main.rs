@@ -75,7 +75,6 @@ fn parseCSV(path: String) -> Result<Vec<Ticker>, csv::Error> {
         let tick = Ticker{name: record.get(0).unwrap().to_string(), amount: ff::parse(record.get(1).unwrap()).unwrap(), price: 0.0, ticker_type };
         data.push(tick);
     }
-    println!("{:?}", data);
     Ok(data)
 }
 
