@@ -4,95 +4,113 @@
 use chrono::{DateTime, Utc};
 use csv;
 use fast_float as ff;
-use std::{fs, borrow::Borrow};
+use std::{fs};
 use std::any::type_name;
 use reqwest as req;
 use req::header;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap};
 
-fn parse_csv(path: String) -> Result<Vec<Ticker>, csv::Error> {
-    let mut file = csv::Reader::from_path(path + "/input.csv")?;
-    let mut data: Vec<Ticker> = Vec::new();
-    for result in file.records() {
-        let record = result?;
-        let ticker_type = match record.get(0) {
-            Some("usd") | Some("eur") => TickerType::FIAT,
-            Some("usdc") | Some("usdt") => TickerType::STABLE,
-            Some(v) => TickerType::CRYPTO,
-            None => panic!()
-        };
-        let tick = Ticker{name: record.get(0).unwrap().to_string(), amount: ff::parse(record.get(1).unwrap()).unwrap(), price: 0.0, ticker_type };
-        data.push(tick);
-    }
-    Ok(data)
+fn readFile(path: String) -> String {
+    fs::read_to_string(path).expect("Unable to read file")
 }
 
-fn parseJson(path: String) -> Result<serde_json::Value, serde_json::Error>{
-    let data = fs::read_to_string(path)
-        .expect("Unable to read file");
-    let json: serde_json::Value = serde_json::from_str(&data)
-        .expect("JSON does not have correct format.");
-    Ok(json) // json["property"]
-}
-
-fn getPath() -> String {
-    std::env::current_dir().unwrap().to_string_lossy().to_string()
-}
-
-fn getSettings() -> Result<serde_json::Value, serde_json::Error>{
-    let path = getPath();
-    parseJson(path+"/settings.json")
-}
-
-fn writeFile(filename: &str, content: String) {
-    let path = getPath()+"/"+filename;
+fn writeFile(path: String, content: String) {
     fs::write(path, content).expect("Unable to write file");
 }
 
-#[derive(Debug)]
+fn loadJson(data: String) -> serde_json::Value{
+    serde_json::from_str(&data).expect("JSON does not have correct format.")
+}
+
+fn dumpJson(data: &Vec<Ticker>) -> String {
+    serde_json::to_string_pretty(&data).expect("JSON does not have correct format.")
+}
+
+fn getCurrentPath() -> String {
+    std::env::current_dir().unwrap().to_string_lossy().to_string()+"/"
+}
+
+fn getSettings() -> serde_json::Value{
+    let path = getCurrentPath();
+    loadJson(readFile(path+"settings.json"))
+}
+
+fn getIndexOf(data: &Vec<Ticker>, tempTicker: &Ticker) -> usize{
+    data.iter().position(|r| r == tempTicker ).unwrap()
+}
+
+#[derive(Debug, PartialEq, Serialize, Clone)]
 pub enum TickerType {
     STABLE,
     FIAT,
-    CRYPTO
+    CRYPTO,
+    NOT_SPECIFIED
 }
 
-#[derive(Debug)]
-pub struct Ticker{
-    pub name: String,
-    pub ticker_type: TickerType,
-    pub amount: f32,
-    pub price: f32,
+#[derive(Debug, Serialize, Clone)]
+struct Ticker{
+    name: String,
+    cmcID: String, 
+    ticker_type: TickerType,
+    amount: f32,
+    price: f32,
+}
+
+impl PartialEq for Ticker {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
 }
 
 impl Ticker{
-    fn createTicker(name: String, ticker_type: TickerType, amount: f32) -> Self{
-        Self { name, ticker_type, amount, price: 0.0 }
+    fn createTicker(name: String, cmcID: String, amount: f32) -> Self{
+        Self { name, cmcID, ticker_type: TickerType::NOT_SPECIFIED, amount, price: 0.0 }
     }
 
-    fn createFiat(name: String, amount: f32) -> Self{
-        Self { name, ticker_type: TickerType::FIAT, amount, price: 1.0 }
+    fn createTickerWOcmcID(name: String, amount: f32, ticker_type: TickerType) -> Self{
+        Self { name, cmcID: String::new() , ticker_type, amount, price: 0.0 }
     }
 
-    fn createCrypto(name: String, amount: f32) -> Self{
-        Self { name, ticker_type: TickerType::CRYPTO , amount, price: 0.0 }
+    fn createFiat(name: String, cmcID: String, amount: f32) -> Self{
+        Self { name, cmcID, ticker_type: TickerType::FIAT, amount, price: 1.0 }
     }
 
-    fn createStable(name: String, amount: f32) -> Self{
-        Self { name, ticker_type: TickerType::STABLE , amount, price: 0.0 }
+    fn createCrypto(name: String, cmcID: String, amount: f32) -> Self{
+        Self { name, cmcID, ticker_type: TickerType::CRYPTO , amount, price: 0.0 }
+    }
+
+    fn createStable(name: String, cmcID: String, amount: f32) -> Self{
+        Self { name, cmcID, ticker_type: TickerType::STABLE , amount, price: 0.0 }
     }
 }
 
 struct Wallet {
     cryptocurrencies: Vec<Ticker>,
     stableCoins: Vec<Ticker>,
+    fiat: Vec<Ticker>,
     baseCurrency: Ticker,
     total_value: f32,
-    date: DateTime<Utc>
+    date: DateTime<Utc>,
+    cmc: cmcApi
 }
 
 impl Wallet { 
-    fn new(cryptocurrencies: Vec<Ticker>, stableCoins: Vec<Ticker>, baseCurrency: Ticker) -> Self{
-        Self { cryptocurrencies, stableCoins, baseCurrency, total_value: 0.0, date: Utc::now() } 
+    fn new(tickers: Vec<Ticker>, baseCurrency: Ticker) -> Self{
+        let mut cryptocurrencies = Vec::new();
+        let mut stableCoins = Vec::new();
+        let mut fiat = Vec::new();
+
+        for tick in tickers{
+            // ticker must have a type at this stage
+            match tick.ticker_type {
+                TickerType::CRYPTO => cryptocurrencies.push(tick),
+                TickerType::STABLE => stableCoins.push(tick),
+                TickerType::FIAT => fiat.push(tick),
+                TickerType::NOT_SPECIFIED => panic!()
+            }
+        }
+        Self { cryptocurrencies, stableCoins, fiat, baseCurrency, total_value: 0.0, date: Utc::now(), cmc: cmcApi::new() } 
     }
 
     fn calc_total_value(&mut self) {
@@ -108,7 +126,8 @@ impl Wallet {
 struct cmcApi{
     client: req::blocking::Client,
     baseUrl: String,
-    settings: Settings
+    settings: Settings,
+    usedID: Vec<Ticker> // ("ticker", "id")
 }
 
 #[derive(Deserialize, Debug)]
@@ -120,12 +139,9 @@ struct Settings{
     path: String
 }
 
-impl Settings{
-    fn new() -> Self{
-        match getSettings(){
-            Ok(v) => serde_json::from_value(v).unwrap(),
-            Err(_) => panic!()
-        }
+impl Settings {
+    fn new() -> Self { 
+        serde_json::from_value(getSettings()).unwrap()
     }
 }
 
@@ -144,62 +160,137 @@ impl cmcApi{
             .default_headers(headers)
             .build().unwrap();
         
-        Self {client:client, baseUrl:"https://pro-api.coinmarketcap.com/v1/".to_string(), settings: settings }
+        let jsonUsedID = loadJson(readFile(getCurrentPath()+"used_id_CMC.json"));
+        let mut usedID: Vec<Ticker> = Vec::new();
+        for v in jsonUsedID.as_array().unwrap(){
+            let arrV = v.as_object().unwrap();
+            usedID.push(Ticker::createCrypto(arrV["name"].as_str().unwrap().to_owned(), arrV["cmcID"].as_str().unwrap().to_owned(), 0.0))
+        }
+        Self {client:client, baseUrl:"https://pro-api.coinmarketcap.com/v1/".to_string(), settings: settings, usedID }
     }
 
-    fn fetchID(self){
+    fn parse_csv(&self, path: String) ->Vec<Ticker> {
+        let mut file = csv::Reader::from_path(path).unwrap();
+        let mut data: Vec<Ticker> = Vec::new();
+        // check every row of the csv
+        for result in file.records() {
+            let record = result.unwrap();
+            if record.get(0).unwrap().to_string() == "total_invested"{
+                // for now skip total invested row
+                continue;
+            } // retrieve TickerType
+            let ticker_type = match record.get(0) {
+                Some("usd") | Some("eur") => TickerType::FIAT,
+                Some("usdc") | Some("usdt") => TickerType::STABLE,
+                Some(v) => TickerType::NOT_SPECIFIED,
+                None => {println!("Unexpected error...");panic!()}
+            };
+            let tick = Ticker::createTickerWOcmcID(record.get(0).unwrap().to_string(), ff::parse(record.get(1).unwrap()).unwrap(), ticker_type);
+            // check if tick is already in data
+            // in case yes -> sum it's amount to one's amount in data
+            if data.contains(&tick){
+                let index = getIndexOf(&data, &tick);
+                data[index].amount += tick.amount; 
+            }else {data.push(tick);}
+        }
+        data
+    }
+
+    fn fetchID(&self){
         let path = "cryptocurrency/map";
-        let res: String = self.client.get(self.baseUrl+path)
+        let res: String = self.client.get(self.baseUrl.to_owned()+path)
             .send().unwrap().text().unwrap();
-        writeFile("cached_id_CMC.json", res)
+        writeFile(getCurrentPath()+"cached_id_CMC.json", res)
     }
 
     // receive a vector of String(ID)
-    fn getPriceOf(self, symbols: Vec<String>) -> Vec<f64>{
+    fn getPriceOf(&self, symbols: Vec<Ticker>) -> Vec<Ticker>{
         let path = "cryptocurrency/quotes/latest";
         let currency = self.settings.currency.clone();
+        let mut id: Vec<String> = Vec::new();
+        for i in symbols.clone(){
+            id.push(i.cmcID);
+        }
         let param = [
-            ("id", &symbols.join(",")),
+            ("id", &id.join(",").to_owned()),
             ("convert", &currency)
         ];
 
-        let url = req::Url::parse_with_params(&(self.baseUrl+path),  param).unwrap();
-        //println!("{:?}", url);
+        let url = req::Url::parse_with_params(&(self.baseUrl.to_owned()+path),  param).unwrap();
         let res = self.client.get(url).send().unwrap().text().unwrap();
         let a:serde_json::Value = serde_json::from_str(&res).expect("JSON does not have correct format.");
-        let mut toReturn:Vec<f64> = Vec::new();
+        let mut toReturn:Vec<Ticker> = Vec::new();
 
-        for symb in symbols{
-            toReturn.push(a["data"][symb]["quote"][&currency]["price"].as_f64().unwrap());
+        for mut symb in symbols{
+            symb.price = a["data"][&symb.cmcID]["quote"][&currency]["price"].as_f64().unwrap() as f32;
+            toReturn.push(symb);
         }
-        println!("{:?}", toReturn); 
         toReturn
     }
-    /*
-        def getPriceOf(self, symbol: list):
 
-        try:
-            response = self.session.get(self.baseurl+path, params=parameters)
-            data = json.loads(response.text)
-            for symb, id in convertedSymbol.items():
-                toReturn[symb] = data['data'][id]["quote"][self.currency]["price"] # store only price
+    fn dumpUsedID(&self){
+        writeFile(getCurrentPath()+"used_id_CMC.json" , dumpJson(&self.usedID));
+    }
 
-        except (ConnectionError, Timeout, TooManyRedirects):
-            data = json.loads(response.text)
-        
-        # if one or more symbols are not found for any kind of problem 
-        # return also the missing one(s) and data
-        if (set(convertedSymbol.keys()) & set(toReturn.keys())) != set(symbol):
-            return (toReturn, False, set(symbol) - set(toReturn.keys()), data)
-        
-        return (toReturn, True)
-    */
+    fn convertSymbol2ID(&mut self, mut symbols: Vec<Ticker>) -> (Vec<Ticker>, Vec<Ticker>){
+        /*
+            return a vec of Ticker with cmcID field and eventually a vec of Ticker not found
+        */
+        let symboLenght = symbols.len();
+        let startSymbols = symbols.clone();
+
+        let mut convertedId: Vec<Ticker> = Vec::new();
+        for (i, ticker) in self.usedID.iter().enumerate(){
+            if symbols.contains(ticker){
+                let mut newTicker = ticker.clone();
+                newTicker.amount = symbols[getIndexOf(&symbols, ticker)].amount;
+                convertedId.push(newTicker);
+                symbols.remove(getIndexOf(&symbols, ticker)); // remove from searching list
+            }
+        }
+
+        if symbols.len() > 0{
+            let mut found:u8 = 0;
+            let cachedID = loadJson(readFile(getCurrentPath()+"cached_id_CMC.json")); // once in a while run fetchID() to update it 
+
+            for v in cachedID["data"].as_array().unwrap().iter(){
+                let tempTicker = Ticker::createTickerWOcmcID(v["symbol"].as_str().unwrap().to_ascii_lowercase(), 0.0, TickerType::NOT_SPECIFIED);
+                if symbols.contains(&tempTicker){
+                    convertedId.push(Ticker::createCrypto(v["symbol"].as_str().unwrap().to_ascii_lowercase(), v["id"].as_u64().unwrap().to_string(), symbols[getIndexOf(&symbols, &tempTicker)].amount));
+                    found +=1;
+                    symbols.remove(getIndexOf(&symbols, &tempTicker)); // remove from searching list
+                }
+            }
+            
+            if found > 0{
+                self.usedID.extend(convertedId.clone());
+                self.dumpUsedID();
+            }
+        }
+
+        let mut difference: Vec<Ticker> = vec![];
+        if symboLenght == convertedId.len(){
+            println!("all symbols found")
+        }  else{
+            for i in &convertedId {
+                if !startSymbols.contains(&i) {
+                    difference.push(i.clone());
+                }
+            }
+        }
+        (convertedId, difference)
+    }
 
 }
 
 fn main(){
-    let cmc = cmcApi::new();
-    cmc.getPriceOf(vec!["1027".to_string(),"1".to_string()]);
+    let mut cmc = cmcApi::new();
+
+    let csv = cmc.parse_csv(getCurrentPath()+"input.csv");
+    let (found, notFound) = cmc.convertSymbol2ID(csv);
+
+    let prices = cmc.getPriceOf(found);
+    
 }
 
 fn print_type_of<T>(_: &T) {
