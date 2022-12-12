@@ -9,7 +9,7 @@ use std::any::type_name;
 use reqwest as req;
 use req::header;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap};
+use yahoo_finance_api as yahoo;
 
 fn readFile(path: String) -> String {
     fs::read_to_string(path).expect("Unable to read file")
@@ -28,7 +28,7 @@ fn dumpJson(data: &Vec<Ticker>) -> String {
 }
 
 fn getCurrentPath() -> String {
-    std::env::current_dir().unwrap().to_string_lossy().to_string()+"/"
+    std::env::current_dir().expect("Unable to get current path").to_string_lossy().to_string()+"/"
 }
 
 fn getSettings() -> serde_json::Value{
@@ -83,6 +83,20 @@ impl Ticker{
     fn createStable(name: String, cmcID: String, amount: f32) -> Self{
         Self { name, cmcID, ticker_type: TickerType::STABLE , amount, price: 0.0 }
     }
+
+    fn createBaseCurrency(name: String) -> Self{
+        Ticker::createFiat(name.clone(), name, 0.0)
+    }
+}
+
+struct WalletType{
+    cryptoAndStable: bool,
+    cryptoStableAndFiat: bool
+}
+
+impl WalletType{
+    fn createWalletCrypto() -> Self { Self{cryptoAndStable: true, cryptoStableAndFiat: false} }
+    fn createWalletTotal() -> Self { Self{cryptoAndStable: false, cryptoStableAndFiat: true} }
 }
 
 struct Wallet {
@@ -92,34 +106,73 @@ struct Wallet {
     baseCurrency: Ticker,
     total_value: f32,
     date: DateTime<Utc>,
-    cmc: cmcApi
+    cmc: cmcApi,
+    walletType: WalletType 
 }
 
 impl Wallet { 
-    fn new(tickers: Vec<Ticker>, baseCurrency: Ticker) -> Self{
+    fn new(baseCurrency: Ticker, walletType: WalletType) -> Self{
         let mut cryptocurrencies = Vec::new();
         let mut stableCoins = Vec::new();
         let mut fiat = Vec::new();
 
-        for tick in tickers{
-            // ticker must have a type at this stage
+        let cmc = cmcApi::new();
+        let tickers = cmc.parse_csv(getCurrentPath()+"input.csv");
+
+        for mut tick in tickers{
+            // ticker must have a type defined
             match tick.ticker_type {
                 TickerType::CRYPTO => cryptocurrencies.push(tick),
                 TickerType::STABLE => stableCoins.push(tick),
-                TickerType::FIAT => fiat.push(tick),
+                TickerType::FIAT => {tick.price = 1.0;fiat.push(tick)},
                 TickerType::NOT_SPECIFIED => panic!()
             }
         }
-        Self { cryptocurrencies, stableCoins, fiat, baseCurrency, total_value: 0.0, date: Utc::now(), cmc: cmcApi::new() } 
+        Self { cryptocurrencies, stableCoins, fiat, baseCurrency, total_value: 0.0, date: Utc::now(), cmc, walletType } 
+    }
+
+    fn getPriceOf(&mut self, mut group: Vec<Ticker>) -> Vec<Ticker>{
+        let (found, notFound) = self.cmc.convertSymbol2ID(group);
+        if notFound.len() > 0{
+            let mut nameToPrint: Vec<String> = Vec::new();
+            for ticker in notFound{
+                nameToPrint.push(ticker.name);
+            }
+            println!("Not able to convert the following symbol(s): {:?}", nameToPrint);
+        } 
+        self.cmc.getPriceOf(found)
     }
 
     fn calc_total_value(&mut self) {
+        self.cryptocurrencies = self.getPriceOf(self.cryptocurrencies.clone());
+        self.stableCoins = self.getPriceOf(self.stableCoins.clone());
         for crypto in &self.cryptocurrencies{
             self.total_value += crypto.amount * crypto.price; 
         }
         for stable in &self.stableCoins{
             self.total_value += stable.amount * stable.price;       
         }
+        
+        // TODO add option to include/exclude fiat
+        for fiat in &self.fiat{
+            if fiat.name == self.cmc.settings.currency.to_ascii_lowercase(){
+                self.total_value += fiat.amount * fiat.price;
+            }else{
+                let price = self.getForexRate(self.baseCurrency.name.clone(), fiat.name.clone()) as f32;
+                self.total_value += fiat.amount * price;
+            }
+            
+        }
+    }
+
+    // yahoo finance
+    fn getForexRate(&self, fiat1: String, fiat2: String) ->f64{
+        let ticker = fiat1+&fiat2+"=X";
+        println!("{:?}", ticker);
+        let provider = yahoo::YahooConnector::new();
+        let response = provider.get_quote_range(&ticker, "15m", "1d").unwrap();
+        let quotes = response.quotes().unwrap();
+        quotes.last().unwrap().close
     }
 }
 
@@ -166,7 +219,11 @@ impl cmcApi{
             let arrV = v.as_object().unwrap();
             usedID.push(Ticker::createCrypto(arrV["name"].as_str().unwrap().to_owned(), arrV["cmcID"].as_str().unwrap().to_owned(), 0.0))
         }
-        Self {client:client, baseUrl:"https://pro-api.coinmarketcap.com/v1/".to_string(), settings: settings, usedID }
+        let obj = Self {client:client, baseUrl:"https://pro-api.coinmarketcap.com/v1/".to_string(), settings: settings, usedID };
+        if obj.settings.fetchSymb{
+            obj.fetchID();
+        }
+        obj
     }
 
     fn parse_csv(&self, path: String) ->Vec<Ticker> {
@@ -182,7 +239,7 @@ impl cmcApi{
             let ticker_type = match record.get(0) {
                 Some("usd") | Some("eur") => TickerType::FIAT,
                 Some("usdc") | Some("usdt") => TickerType::STABLE,
-                Some(v) => TickerType::NOT_SPECIFIED,
+                Some(v) => TickerType::CRYPTO,
                 None => {println!("Unexpected error...");panic!()}
             };
             let tick = Ticker::createTickerWOcmcID(record.get(0).unwrap().to_string(), ff::parse(record.get(1).unwrap()).unwrap(), ticker_type);
@@ -203,7 +260,8 @@ impl cmcApi{
         writeFile(getCurrentPath()+"cached_id_CMC.json", res)
     }
 
-    // receive a vector of String(ID)
+    // receive a vector of Vec<Ticker> and return it filled with price
+    // retrieved from CoinMarketCap
     fn getPriceOf(&self, symbols: Vec<Ticker>) -> Vec<Ticker>{
         let path = "cryptocurrency/quotes/latest";
         let currency = self.settings.currency.clone();
@@ -269,9 +327,7 @@ impl cmcApi{
         }
 
         let mut difference: Vec<Ticker> = vec![];
-        if symboLenght == convertedId.len(){
-            println!("all symbols found")
-        }  else{
+        if symboLenght != convertedId.len(){
             for i in &convertedId {
                 if !startSymbols.contains(&i) {
                     difference.push(i.clone());
@@ -284,13 +340,9 @@ impl cmcApi{
 }
 
 fn main(){
-    let mut cmc = cmcApi::new();
-
-    let csv = cmc.parse_csv(getCurrentPath()+"input.csv");
-    let (found, notFound) = cmc.convertSymbol2ID(csv);
-
-    let prices = cmc.getPriceOf(found);
-    
+    let mut wallet = Wallet::new(Ticker::createBaseCurrency("eur".to_string()), WalletType::createWalletCrypto() );
+    wallet.calc_total_value();
+    println!("{:?}", wallet.total_value)
 }
 
 fn print_type_of<T>(_: &T) {
