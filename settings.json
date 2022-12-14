@@ -1,7 +1,7 @@
 {
     "currency": "EUR",
     "provider": "cg",
-    "fetchSymb": true,
-    "CMC_key": "YOUR_API_KEY",
+    "fetch_symb": true,
+    "cmc_key": "YOUR_API_KEY",
     "path" : "D:\\crypto"
 }
