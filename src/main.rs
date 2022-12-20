@@ -164,24 +164,26 @@ impl Wallet {
     }
 
     fn calc_total_value(&mut self) {
-        self.cryptocurrencies = self.get_price_of(self.cryptocurrencies.clone());
-        self.stable_coins = self.get_price_of(self.stable_coins.clone());
-        for crypto in &self.cryptocurrencies{
-            self.total_value += crypto.amount * crypto.price; 
-        }
-        for stable in &self.stable_coins{
-            self.total_value += stable.amount * stable.price;       
+        if self.wallet_type.crypto_stable_fiat || self.wallet_type.crypto_stable{
+            self.cryptocurrencies = self.get_price_of(self.cryptocurrencies.clone());
+            self.stable_coins = self.get_price_of(self.stable_coins.clone());
+            for crypto in &self.cryptocurrencies{
+                self.total_value += crypto.amount * crypto.price; 
+            }
+            for stable in &self.stable_coins{
+                self.total_value += stable.amount * stable.price;       
+            }
         }
         
-        // TODO add option to include/exclude fiat
-        for fiat in &self.fiat{
-            if fiat.name == self.cmc.settings.currency.to_ascii_lowercase(){
-                self.total_value += fiat.amount * fiat.price;
-            }else{
-                let price = self.get_forex_rate(self.base_currency.name.clone(), fiat.name.clone()) as f32;
-                self.total_value += fiat.amount * price;
+        if self.wallet_type.crypto_stable_fiat{
+            for fiat in &self.fiat{
+                if fiat.name == self.cmc.settings.currency.to_ascii_lowercase(){
+                    self.total_value += fiat.amount * fiat.price;
+                }else{
+                    let price = self.get_forex_rate(self.base_currency.name.clone(), fiat.name.clone()) as f32;
+                    self.total_value += fiat.amount * price;
+                }
             }
-            
         }
     }
 
